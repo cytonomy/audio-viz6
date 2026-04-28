@@ -286,8 +286,8 @@ function spawnParticlesComingled() {
     const exceedNorm = Math.max(0, (energy - range.threshold)) / headroom;
     const exceedPower = Math.pow(exceedNorm, 1.8);
 
-    let count = Math.floor(exceedPower * 36 * range.weight);
-    count = Math.min(count, 48);
+    let count = Math.floor(exceedPower * 24 * range.weight);
+    count = Math.min(count, 32);
     if (count < 1) continue;
 
     for (let j = 0; j < count; j++) {
@@ -316,21 +316,28 @@ function createColoredParticle(range, energy) {
 
   const homeAngle = baseAngle + globalRotation + energyWobble;
 
-  // Angular jitter within the sector (gaussian so the zone is a cluster,
-  // not a perfect line). ~15° standard deviation.
-  const angleJitter = randomGaussian(0, 0.26);
-  const spawnAngle = homeAngle + angleJitter;
-
-  // Radial distribution heavily biased toward the center.
-  // pow(random(), k) with k > 1 pushes density inward; k=2 is strongly center-heavy.
+  // Cluster blob per range: each frequency has a fixed home position on a
+  // mid-radius ring, and particles spawn in a small gaussian blob around it.
+  // This makes same-color particles visibly cluster on spawn — the flowfield
+  // and swirl then carry them outward and mix the clusters together over time.
   const maxR = Math.min(width, height) * 0.48;
-  const rNorm = Math.pow(Math.random(), 2.0);
-  const r = rNorm * maxR;
-
+  const clusterRadius = maxR * 0.42;
   const cx = width / 2;
   const cy = height / 2;
-  const x = cx + Math.cos(spawnAngle) * r;
-  const y = cy + Math.sin(spawnAngle) * r;
+  const clusterX = cx + Math.cos(homeAngle) * clusterRadius;
+  const clusterY = cy + Math.sin(homeAngle) * clusterRadius;
+
+  // Blob size scales with range energy — louder bands have a slightly wider
+  // cluster (more particles, looser pack) so transients still look explosive.
+  const blobBase = maxR * 0.07;
+  const blobEnergy = Math.min(range.relativeEnergy || 0, 1.5) * maxR * 0.04;
+  const blobSize = blobBase + blobEnergy;
+  const x = clusterX + randomGaussian(0, blobSize);
+  const y = clusterY + randomGaussian(0, blobSize);
+
+  // rNorm derived from actual spawn position so the radial-thickness logic
+  // below still has something meaningful to read (used for stroke weight).
+  const rNorm = Math.min(Math.hypot(x - cx, y - cy) / maxR, 1);
 
   const p = new Particle(x, y);
 
@@ -344,49 +351,47 @@ function createColoredParticle(range, energy) {
   const lifeRoll = Math.random();
   let lifeMultiplier, fadeRate;
   if (lifeRoll < 0.55) {
-    // Majority: short fast streaks
-    lifeMultiplier = random(1.0, 1.5);
-    fadeRate = random(2.0, 3.2);
+    // Majority: medium streaks
+    lifeMultiplier = random(1.6, 2.4);
+    fadeRate = random(1.4, 2.2);
   } else if (lifeRoll < 0.88) {
-    // Mid: medium ribbons
-    lifeMultiplier = random(1.8, 2.8);
-    fadeRate = random(1.0, 1.7);
+    // Mid: long ribbons
+    lifeMultiplier = random(2.6, 3.8);
+    fadeRate = random(0.8, 1.3);
   } else {
-    // Rare: long persistent ribbons
-    lifeMultiplier = random(3.0, 4.5);
-    fadeRate = random(0.4, 0.8);
+    // Rare: very long persistent ribbons
+    lifeMultiplier = random(4.0, 5.5);
+    fadeRate = random(0.3, 0.6);
   }
   p.lifespan = 255 * range.alpha * lifeMultiplier;
   p.fadeRate = fadeRate;
 
-  // Stroke weight: radial bias (center thicker) × random size category ×
-  // an energy boost so loud notes spawn visibly chunkier particles in their
-  // own color — gives each note a clearer per-loudness visual signature
-  // even when total particle counts are modest.
-  const radialWeight = 1 + (1 - rNorm) * 3.0;  // 4.0 at center → 1.0 at edge
+  // Stroke weight: thinner overall — particles read as streaks, not blobs.
+  // Mild radial bias (center slightly thicker) × random size × small energy
+  // boost so loud notes still spawn visibly chunkier particles in their color.
+  const radialWeight = 0.6 + (1 - rNorm) * 1.2;  // 1.8 at center → 0.6 at edge
   const sizeRoll = Math.random();
   let sizeFactor;
-  if (sizeRoll < 0.6) {
-    sizeFactor = random(0.4, 1.0);   // slim majority
-  } else if (sizeRoll < 0.92) {
-    sizeFactor = random(1.0, 2.0);   // medium
+  if (sizeRoll < 0.65) {
+    sizeFactor = random(0.4, 0.9);   // slim majority
+  } else if (sizeRoll < 0.93) {
+    sizeFactor = random(0.9, 1.5);   // medium
   } else {
-    sizeFactor = random(2.0, 3.5);   // rare chunky standouts
+    sizeFactor = random(1.5, 2.4);   // rare chunky standouts
   }
-  // relativeEnergy is ~0 at threshold, ~1 at 4× threshold. Cap the boost so
-  // sustained loud bands don't pin everything at max thickness.
-  const energyBoost = 1 + Math.min(range.relativeEnergy || 0, 1.5) * 0.55;
+  const energyBoost = 1 + Math.min(range.relativeEnergy || 0, 1.5) * 0.35;
   p.strokeWeight = radialWeight * sizeFactor * energyBoost;
 
-  // Speed scaling by group
+  // Speed scaling by group — bumped a touch so the now-longer-lived particles
+  // travel meaningfully further, producing visibly longer streak trails.
   if (range.group === "bass") {
-    p.maxSpeed = map(energy, range.threshold, 1, 1.0, 3.2);
+    p.maxSpeed = map(energy, range.threshold, 1, 1.4, 3.8);
   } else if (range.group === "high") {
-    p.maxSpeed = map(energy, range.threshold, 0.5, 2.2, 5.2);
+    p.maxSpeed = map(energy, range.threshold, 0.5, 2.6, 6.0);
   } else {
-    p.maxSpeed = map(energy, range.threshold, 1, 1.6, 4.2);
+    p.maxSpeed = map(energy, range.threshold, 1, 2.0, 4.8);
   }
-  p.maxSpeed = constrain(p.maxSpeed, 1.0, 5.2);
+  p.maxSpeed = constrain(p.maxSpeed, 1.2, 6.0);
 
   particles.push(p);
 }
