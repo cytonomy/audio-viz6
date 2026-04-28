@@ -67,6 +67,12 @@ let midLevel = 0;
 let highLevel = 0;
 let peakEnergy = 0;
 
+// Beat-pulse envelope: smoothed peak-hold on bassLevel, used to gently
+// modulate stroke weight on every live particle so the whole canvas
+// breathes with the beat. Skipping true BPM extraction — the envelope
+// alone reads as "to the beat" and never mis-locks.
+let pulseEnvelope = 0;
+
 // Convert the HSL palette to RGB once at load time so particle rendering
 // (which uses the default RGB color mode) works without push/pop gymnastics.
 function hslToRgb(h, s, l) {
@@ -87,7 +93,11 @@ for (const r of frequencyRanges) {
 // particle wasn't assigned one (so any v3-origin particles would still work).
 Particle.prototype.show = function () {
   stroke(red(this.color), green(this.color), blue(this.color), this.lifespan);
-  strokeWeight(this.strokeWeight || 1);
+  // Apply the global beat pulse to every live particle's stroke (not just
+  // newly-spawned ones) so the whole field thickens together on the beat.
+  // 0.30 multiplier puts the swing at ~30% on peaks — clearly felt as a
+  // bounce. Above ~0.40 starts crossing into strobe territory.
+  strokeWeight((this.strokeWeight || 1) * (1 + pulseEnvelope * 0.30));
   line(this.pos.x, this.pos.y, this.prevPos.x, this.prevPos.y);
   this.updatePrev();
 };
@@ -259,6 +269,11 @@ function analyzeAudio() {
   bassLevel = bassN ? bassSum / bassN : 0;
   midLevel = midN ? midSum / midN : 0;
   highLevel = highN ? highSum / highN : 0;
+
+  // Peak-hold envelope on bassLevel: rises instantly to a new bass peak,
+  // then decays exponentially. At 60fps a 0.92 decay halves the envelope
+  // in ~8 frames (~130ms) — feels like a heartbeat, not a flicker.
+  pulseEnvelope = Math.max(pulseEnvelope * 0.92, bassLevel);
 }
 
 // v6: Multiple ranges can spawn simultaneously (comingling), but spawn counts
@@ -286,8 +301,12 @@ function spawnParticlesComingled() {
     const exceedNorm = Math.max(0, (energy - range.threshold)) / headroom;
     const exceedPower = Math.pow(exceedNorm, 1.8);
 
-    let count = Math.floor(exceedPower * 24 * range.weight);
-    count = Math.min(count, 32);
+    // Spawn-rate is also pulse-modulated: on the beat, ranges that pass the
+    // peak gate fire up to ~50% more particles. Combined with the stroke
+    // pulse, this puts a visible density burst right on the kick.
+    const beatSpawnBoost = 1 + pulseEnvelope * 0.5;
+    let count = Math.floor(exceedPower * 18 * range.weight * beatSpawnBoost);
+    count = Math.min(count, 40);
     if (count < 1) continue;
 
     for (let j = 0; j < count; j++) {
@@ -351,35 +370,36 @@ function createColoredParticle(range, energy) {
   const lifeRoll = Math.random();
   let lifeMultiplier, fadeRate;
   if (lifeRoll < 0.55) {
-    // Majority: medium streaks
-    lifeMultiplier = random(1.6, 2.4);
-    fadeRate = random(1.4, 2.2);
+    // Majority: medium streaks (longer than v6.0 — softer fade too)
+    lifeMultiplier = random(1.85, 2.75);
+    fadeRate = random(1.1, 1.8);
   } else if (lifeRoll < 0.88) {
     // Mid: long ribbons
-    lifeMultiplier = random(2.6, 3.8);
-    fadeRate = random(0.8, 1.3);
+    lifeMultiplier = random(3.0, 4.4);
+    fadeRate = random(0.7, 1.2);
   } else {
     // Rare: very long persistent ribbons
-    lifeMultiplier = random(4.0, 5.5);
-    fadeRate = random(0.3, 0.6);
+    lifeMultiplier = random(4.5, 6.3);
+    fadeRate = random(0.25, 0.55);
   }
   p.lifespan = 255 * range.alpha * lifeMultiplier;
   p.fadeRate = fadeRate;
 
   // Stroke weight: thinner overall — particles read as streaks, not blobs.
-  // Mild radial bias (center slightly thicker) × random size × small energy
-  // boost so loud notes still spawn visibly chunkier particles in their color.
-  const radialWeight = 0.6 + (1 - rNorm) * 1.2;  // 1.8 at center → 0.6 at edge
+  // Tightened from v6.0 ranges to bring the average ~20% thinner; the global
+  // pulseEnvelope multiplier in Particle.show then breathes the whole field
+  // back up by up to 15% on the beat, so loud transients still feel chunky.
+  const radialWeight = 0.5 + (1 - rNorm) * 1.0;  // 1.5 at center → 0.5 at edge
   const sizeRoll = Math.random();
   let sizeFactor;
   if (sizeRoll < 0.65) {
-    sizeFactor = random(0.4, 0.9);   // slim majority
+    sizeFactor = random(0.35, 0.8);   // slim majority
   } else if (sizeRoll < 0.93) {
-    sizeFactor = random(0.9, 1.5);   // medium
+    sizeFactor = random(0.8, 1.35);   // medium
   } else {
-    sizeFactor = random(1.5, 2.4);   // rare chunky standouts
+    sizeFactor = random(1.35, 2.1);   // rare chunky standouts
   }
-  const energyBoost = 1 + Math.min(range.relativeEnergy || 0, 1.5) * 0.35;
+  const energyBoost = 1 + Math.min(range.relativeEnergy || 0, 1.5) * 0.27;
   p.strokeWeight = radialWeight * sizeFactor * energyBoost;
 
   // Speed scaling by group — bumped a touch so the now-longer-lived particles
