@@ -52,6 +52,16 @@ let uiVisible = true;
 let swirlPhase = 0;      // drifts the swirl center slightly so it doesn't feel mechanical
 let globalRotation = 0;  // rotates the angular arrangement of freq zones around the canvas
 
+// Per-group energy averages (computed in analyzeAudio). Used by rotation,
+// swirl, and spawn logic so each frequency family drives a distinct visual:
+//   bass  → swirl-strength pulses (the whole canvas sweeps wider on a kick)
+//   mid   → steady rotation rate
+//   high  → quick rotation kicks + a small angular jitter on rotation
+let bassLevel = 0;
+let midLevel = 0;
+let highLevel = 0;
+let peakEnergy = 0;
+
 // Convert the HSL palette to RGB once at load time so particle rendering
 // (which uses the default RGB color mode) works without push/pop gymnastics.
 function hslToRgb(h, s, l) {
@@ -105,14 +115,28 @@ function draw() {
   fill(0, 0, 0, 34);
   rect(0, 0, width, height);
 
-  // Advance the global rotation. Base rate + audio-reactive boost.
-  // Positive = CCW rotation of the color wheel. Bumped up for visible spin.
-  globalRotation += 0.008 + audioLevel * 0.008;
+  // Audio analysis must run before rotation/swirl so they can read the
+  // freshly-computed per-group energy levels (bass/mid/high).
+  if (audioInitialized || fallbackMode) {
+    analyzeAudio();
+  }
+
+  // Global rotation: each frequency family contributes differently so the
+  // canvas response feels distinct per sound type rather than one blended
+  // audioLevel curve.
+  //   - mids carry steady sustained rotation
+  //   - highs add zippy kicks (treble = visible spin acceleration)
+  //   - bass mildly drags rotation down (heavy low end feels weightier)
+  // Bumped base rate for a more visible spin even in silence.
+  const highKick = highLevel * 0.024 * (1 + 0.4 * sin(frameCount * 0.18));
+  globalRotation += 0.014
+                  + midLevel * 0.016
+                  + highKick
+                  - bassLevel * 0.004;
 
   updateFlowField();
 
   if (audioInitialized || fallbackMode) {
-    analyzeAudio();
     spawnParticlesComingled();
   }
 
@@ -153,11 +177,12 @@ function updateFlowField() {
   const cx = width / 2 + cos(swirlPhase) * width * 0.03;
   const cy = height / 2 + sin(swirlPhase * 0.7) * height * 0.03;
 
-  // Stronger base swirl so whole-canvas rotation is clearly visible; modest
-  // audio boost on top. With the quadratic radial ramp below, the center is
-  // still calm and the edges sweep dramatically.
-  const swirlBase = 1.3;
-  const swirlBoost = audioLevel * 0.5;
+  // Swirl strength: bass dominates here so kick drums / sub-bass produce a
+  // clearly-felt "sweep wider" pulse, while mid/high audio adds a smaller
+  // generic boost. The quadratic radial ramp below keeps the center calm
+  // and the edges sweep dramatically.
+  const swirlBase = 1.5;
+  const swirlBoost = bassLevel * 1.1 + audioLevel * 0.25;
   const swirlStrength = swirlBase + swirlBoost;
 
   // Normalize radius against the distance from center to the farthest corner.
@@ -209,6 +234,26 @@ function analyzeAudio() {
     audioLevel = 0.3 + 0.3 * sin(frameCount * 0.05);
     if (random(1) < 0.05) audioLevel = random(0.2, 0.8);
   }
+
+  // Per-band + per-group rollup. Stored on the range objects so the spawn
+  // pass can reuse them, plus aggregated into bass/mid/high group levels
+  // that drive rotation and swirl.
+  let bassSum = 0, midSum = 0, highSum = 0;
+  let bassN = 0, midN = 0, highN = 0;
+  peakEnergy = 0;
+  for (const range of frequencyRanges) {
+    const energy = getBandEnergy(range.min, range.max);
+    range.currentEnergy = energy;
+    range.relativeEnergy = 4 * energy / range.threshold;
+    range.isActive = energy > range.threshold;
+    if (range.isActive && energy > peakEnergy) peakEnergy = energy;
+    if (range.group === "bass") { bassSum += energy; bassN++; }
+    else if (range.group === "mid") { midSum += energy; midN++; }
+    else if (range.group === "high") { highSum += energy; highN++; }
+  }
+  bassLevel = bassN ? bassSum / bassN : 0;
+  midLevel = midN ? midSum / midN : 0;
+  highLevel = highN ? highSum / highN : 0;
 }
 
 // v6: Multiple ranges can spawn simultaneously (comingling), but spawn counts
@@ -216,18 +261,8 @@ function analyzeAudio() {
 // This prevents bleed bands (e.g. when bass is active, upper-bass/low-mids
 // often show moderate energy too) from muddying the color.
 function spawnParticlesComingled() {
-  // First pass: compute energies and find the peak
-  let peakEnergy = 0;
-  for (let i = 0; i < frequencyRanges.length; i++) {
-    const range = frequencyRanges[i];
-    const energy = getBandEnergy(range.min, range.max);
-    range.currentEnergy = energy;
-    range.relativeEnergy = 4 * energy / range.threshold;
-    range.isActive = energy > range.threshold;
-    if (range.isActive && energy > peakEnergy) peakEnergy = energy;
-  }
-
-  // Second pass: spawn, with peak-relative gating + power weighting.
+  // Per-range energies + peakEnergy are now computed in analyzeAudio() so
+  // rotation/swirl can read them too. Just iterate and spawn here.
   for (let i = 0; i < frequencyRanges.length; i++) {
     const range = frequencyRanges[i];
     if (!range.isActive) continue;
