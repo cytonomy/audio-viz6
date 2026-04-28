@@ -98,9 +98,11 @@ function setup() {
 }
 
 function draw() {
-  // Fade background for the trail effect
+  // Fade background for the trail effect.
+  // Alpha must stay ≥ ~30 — below that, 8-bit canvas rounding causes faint
+  // pixels to never decay to pure black, leaving a permanent haze on the canvas.
   noStroke();
-  fill(0, 0, 0, 22);
+  fill(0, 0, 0, 34);
   rect(0, 0, width, height);
 
   // Advance the global rotation. Base rate + audio-reactive boost.
@@ -242,8 +244,8 @@ function spawnParticlesComingled() {
     const exceedNorm = Math.max(0, (energy - range.threshold)) / headroom;
     const exceedPower = Math.pow(exceedNorm, 1.8);
 
-    let count = Math.floor(exceedPower * 18 * range.weight);
-    count = Math.min(count, 22);
+    let count = Math.floor(exceedPower * 58 * range.weight);
+    count = Math.min(count, 75);
     if (count < 1) continue;
 
     for (let j = 0; j < count; j++) {
@@ -292,14 +294,42 @@ function createColoredParticle(range, energy) {
 
   // Use the pre-computed RGB values for the range
   p.color = color(range.rgb[0], range.rgb[1], range.rgb[2]);
-  // Particle.show() uses lifespan as alpha; starting it lower dims the particle
-  // throughout its life, and it also fades faster — double-weighting the bass
-  // dampening effect.
-  p.lifespan = 255 * range.alpha;
 
-  // Center particles are thicker; perimeter particles are thin streaks.
-  // rNorm is 0 at center, 1 at the spawn-radius cap. Invert to thicken inward.
-  p.strokeWeight = 1 + (1 - rNorm) * 3.0;  // 4.0 at center → 1.0 at edge
+  // Lifespan + fade-rate variation creates a mix of short streaks and long
+  // ribbon trails. Lifespan can exceed 255 (p5 clamps the alpha when drawing),
+  // so high-lifespan particles stay at full brightness for many frames before
+  // they begin fading — that's what produces a long visible trail.
+  const lifeRoll = Math.random();
+  let lifeMultiplier, fadeRate;
+  if (lifeRoll < 0.55) {
+    // Majority: short fast streaks
+    lifeMultiplier = random(1.0, 1.5);
+    fadeRate = random(2.0, 3.2);
+  } else if (lifeRoll < 0.88) {
+    // Mid: medium ribbons
+    lifeMultiplier = random(1.8, 2.8);
+    fadeRate = random(1.0, 1.7);
+  } else {
+    // Rare: long persistent ribbons
+    lifeMultiplier = random(3.0, 4.5);
+    fadeRate = random(0.4, 0.8);
+  }
+  p.lifespan = 255 * range.alpha * lifeMultiplier;
+  p.fadeRate = fadeRate;
+
+  // Stroke weight: radial bias (center thicker) × random size category so
+  // each "zone" has a mix of slim streaks and chunky standouts.
+  const radialWeight = 1 + (1 - rNorm) * 3.0;  // 4.0 at center → 1.0 at edge
+  const sizeRoll = Math.random();
+  let sizeFactor;
+  if (sizeRoll < 0.6) {
+    sizeFactor = random(0.4, 1.0);   // slim majority
+  } else if (sizeRoll < 0.92) {
+    sizeFactor = random(1.0, 2.0);   // medium
+  } else {
+    sizeFactor = random(2.0, 3.5);   // rare chunky standouts
+  }
+  p.strokeWeight = radialWeight * sizeFactor;
 
   // Speed scaling by group
   if (range.group === "bass") {
@@ -488,6 +518,9 @@ function initializeAudio() {
 }
 
 function windowResized() {
+  // Bail if p5 fires this before setup() has built the renderer / flowfield —
+  // can happen on page load if the browser dispatches a resize during init.
+  if (!flowfield || typeof width === 'undefined') return;
   resizeCanvas(windowWidth, windowHeight);
   background(0);
   flowfield.cols = floor(width / flowfield.scale);

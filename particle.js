@@ -6,6 +6,7 @@ class Particle {
     this.maxSpeed = 4; // Default speed that will be modified
     this.prevPos = this.pos.copy();
     this.lifespan = 255;
+    this.fadeRate = 2;
     this.color = color(255); // Default white color
   }
 
@@ -14,7 +15,7 @@ class Particle {
     this.vel.limit(this.maxSpeed);
     this.pos.add(this.vel);
     this.acc.mult(0);
-    this.lifespan -= 2;
+    this.lifespan -= this.fadeRate;
   }
 
   applyForce(force) {
