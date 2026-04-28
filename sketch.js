@@ -73,6 +73,16 @@ let peakEnergy = 0;
 // alone reads as "to the beat" and never mis-locks.
 let pulseEnvelope = 0;
 
+// Touch / click disruptions: each entry is a localized swirl impulse
+// {x, y, life, strength} that adds a tangential boost to flowfield cells
+// within `TOUCH_RADIUS`, fading out as `life` decays from TOUCH_LIFE → 0.
+// Keeps 'as long as you touch it' wakes feeling physical instead of
+// resetting between frames.
+let touchImpulses = [];
+const TOUCH_RADIUS = 150;
+const TOUCH_LIFE = 45;
+const TOUCH_STRENGTH = 3.0;
+
 // Convert the HSL palette to RGB once at load time so particle rendering
 // (which uses the default RGB color mode) works without push/pop gymnastics.
 function hslToRgb(h, s, l) {
@@ -104,6 +114,9 @@ Particle.prototype.show = function () {
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
+  // Cap pixel density: phones often report DPR 3, which means rendering 9× the
+  // fragments. 2 keeps strokes crisp without melting mobile GPUs.
+  pixelDensity(Math.min(displayDensity(), 2));
   background(0);
 
   flowfield = {
@@ -119,7 +132,7 @@ function setup() {
 
   textAlign(CENTER);
   fill(255);
-  text("Click anywhere to start audio input", width/2, height/2);
+  text("Tap or click anywhere to start audio input", width/2, height/2);
 }
 
 function draw() {
@@ -177,10 +190,10 @@ function draw() {
     fill(255);
     textAlign(CENTER, CENTER);
     textSize(18);
-    text('Click anywhere to start audio input', width/2, height/2);
+    text('Tap or click anywhere to start audio input', width/2, height/2);
     textSize(12);
     fill(180);
-    text('v6 — swirl + distinct zones · F: fullscreen · H: toggle HUD', width/2, height/2 + 30);
+    text('v6 — swirl + distinct zones · touch to disrupt · F: fullscreen · H: toggle HUD', width/2, height/2 + 30);
   }
 }
 
@@ -230,12 +243,71 @@ function updateFlowField() {
         v.add(tangent);
       }
 
+      // Touch disruptions: each active impulse adds a localized tangential
+      // (swirl) push to nearby cells, decaying with both distance and age.
+      // Using a quadratic age falloff so the wake fades naturally rather than
+      // cutting off abruptly when the impulse expires.
+      for (let k = 0; k < touchImpulses.length; k++) {
+        const imp = touchImpulses[k];
+        const tdx = cellX - imp.x;
+        const tdy = cellY - imp.y;
+        const tr = Math.hypot(tdx, tdy);
+        if (tr < TOUCH_RADIUS && tr > 0.001) {
+          const distFalloff = 1 - tr / TOUCH_RADIUS;
+          const ageFalloff = (imp.life / TOUCH_LIFE) * (imp.life / TOUCH_LIFE);
+          const mag = imp.strength * distFalloff * ageFalloff;
+          // Tangent perpendicular to the touch→cell vector — same handedness
+          // as the global swirl so the disruption reads as "stir harder here".
+          v.x += (-tdy / tr) * mag;
+          v.y += (tdx / tr) * mag;
+        }
+      }
+
       flowfield.field[index] = v;
       xoff += 0.1;
     }
     yoff += 0.1;
   }
   flowfield.zoff += 0.01;
+
+  // Decay + prune touch impulses.
+  for (let i = touchImpulses.length - 1; i >= 0; i--) {
+    touchImpulses[i].life--;
+    if (touchImpulses[i].life <= 0) touchImpulses.splice(i, 1);
+  }
+}
+
+// Drop a localized swirl impulse + a small particle burst at (x, y). Used by
+// both touch and mouse-click handlers; strengthMul lets touchMoved drag
+// trails register at lower intensity than the initial tap.
+function triggerDisruption(x, y, strengthMul) {
+  strengthMul = strengthMul == null ? 1 : strengthMul;
+  touchImpulses.push({
+    x: x,
+    y: y,
+    life: TOUCH_LIFE,
+    strength: TOUCH_STRENGTH * strengthMul
+  });
+
+  // Particle burst: rainbow spray using random palette colors so the touch
+  // visibly "splashes" regardless of what's currently dominant in the audio.
+  const burstCount = Math.max(1, Math.floor(15 * strengthMul));
+  for (let i = 0; i < burstCount; i++) {
+    const range = frequencyRanges[Math.floor(Math.random() * frequencyRanges.length)];
+    const angle = Math.random() * TWO_PI;
+    const radius = Math.abs(randomGaussian(0, 14));
+    const px = x + Math.cos(angle) * radius;
+    const py = y + Math.sin(angle) * radius;
+    const p = new Particle(px, py);
+    p.color = color(range.rgb[0], range.rgb[1], range.rgb[2]);
+    p.lifespan = 255 * range.alpha * random(2.4, 3.4);
+    p.fadeRate = random(0.9, 1.6);
+    p.strokeWeight = random(0.7, 1.6);
+    p.maxSpeed = random(2.5, 5.0);
+    // Initial outward kick so the burst visibly explodes from the touch.
+    p.vel = createVector(Math.cos(angle) * 2.6, Math.sin(angle) * 2.6);
+    particles.push(p);
+  }
 }
 
 function analyzeAudio() {
@@ -500,11 +572,42 @@ function displayFrequencyLegend() {
 function mousePressed() {
   if (!audioInitialized && !fallbackMode) {
     initializeAudio();
+    return false;
   }
   if (mouseButton === RIGHT) {
     showFrequencyLegend = !showFrequencyLegend;
     return false;
   }
+  // Left-click on the canvas after audio is up = a disruption (matches
+  // the touch path for desktop users).
+  triggerDisruption(mouseX, mouseY, 1);
+  return false;
+}
+
+// Mobile / touchscreen: p5 fires touchStarted/touchMoved/touchEnded and
+// suppresses the synthetic mouse events when these handlers exist and
+// return false. Returning false also blocks the browser's default pinch /
+// double-tap zoom and pull-to-refresh, which would otherwise yank the
+// canvas around mid-interaction.
+function touchStarted() {
+  if (!audioInitialized && !fallbackMode) {
+    initializeAudio();
+    return false;
+  }
+  // Use the first active touch if available; fall back to mouseX/Y.
+  const t = (touches && touches.length) ? touches[0] : { x: mouseX, y: mouseY };
+  triggerDisruption(t.x, t.y, 1);
+  return false;
+}
+
+function touchMoved() {
+  // Throttle drag-induced disruptions so fast swipes don't carpet-bomb the
+  // field. Every 4 frames (~67ms at 60fps) at half strength reads as a wake.
+  if (frameCount % 4 === 0 && (audioInitialized || fallbackMode)) {
+    const t = (touches && touches.length) ? touches[0] : { x: mouseX, y: mouseY };
+    triggerDisruption(t.x, t.y, 0.5);
+  }
+  return false;
 }
 
 function keyPressed() {
