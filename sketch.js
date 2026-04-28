@@ -41,10 +41,15 @@ const frequencyRanges = [
   { name: "High Mids",  min:  2000, max:  3000, hue: 165, sat: 80, lit: 55, threshold: 0.16, group: "mid",  weight: 1.15, alpha: 0.90 },
 
   { name: "Low Treble", min:  3000, max:  4000, hue: 190, sat: 90, lit: 58, threshold: 0.10, group: "high", weight: 1.25, alpha: 1.00 },
-  { name: "Mid Treble", min:  4000, max:  6000, hue: 215, sat: 90, lit: 60, threshold: 0.08, group: "high", weight: 1.30, alpha: 1.00 },
-  { name: "Presence",   min:  6000, max:  8000, hue: 240, sat: 85, lit: 62, threshold: 0.06, group: "high", weight: 1.35, alpha: 1.00 },
-  { name: "Brilliance", min:  8000, max: 12000, hue: 270, sat: 80, lit: 65, threshold: 0.04, group: "high", weight: 1.40, alpha: 1.00 },
-  { name: "Air",        min: 12000, max: 20000, hue: 295, sat: 85, lit: 68, threshold: 0.03, group: "high", weight: 1.45, alpha: 1.00 }
+  { name: "Mid Treble", min:  4000, max:  6000, hue: 215, sat: 90, lit: 60, threshold: 0.09, group: "high", weight: 1.20, alpha: 0.95 },
+  { name: "Presence",   min:  6000, max:  8000, hue: 240, sat: 85, lit: 62, threshold: 0.08, group: "high", weight: 1.05, alpha: 0.85 },
+  // Purple bands (Brilliance/Air) used to dominate: very low thresholds + max
+  // weight + full alpha → they fired constantly on background hiss/noise.
+  // Bumped thresholds, halved weight bonus, dropped alpha, and shifted Air
+  // toward pink/magenta (320°) so the top of the spectrum reads as variety
+  // rather than a single purple wash.
+  { name: "Brilliance", min:  8000, max: 12000, hue: 265, sat: 80, lit: 65, threshold: 0.08, group: "high", weight: 0.95, alpha: 0.75 },
+  { name: "Air",        min: 12000, max: 20000, hue: 320, sat: 85, lit: 70, threshold: 0.08, group: "high", weight: 0.90, alpha: 0.70 }
 ];
 
 let showFrequencyLegend = true;
@@ -270,8 +275,10 @@ function spawnParticlesComingled() {
     const energy = range.currentEnergy;
 
     // Peak-relative gate: skip ranges that are far below the loudest range.
-    // Lets strong ranges dominate without totally muting nearby bleed.
-    if (peakEnergy > 0 && energy / peakEnergy < 0.45) continue;
+    // Tightened from 0.45 → 0.58 — only ranges within ~half the dominant
+    // range's intensity spawn at all. Makes the dominant note's color pop
+    // instead of blending with neighboring bleed bands into a haze.
+    if (peakEnergy > 0 && energy / peakEnergy < 0.58) continue;
 
     // Normalized exceedance (0 at threshold, ~1 when very loud). Power curve
     // makes mid-energy bands spawn very little; only loud bands spawn a lot.
@@ -279,8 +286,8 @@ function spawnParticlesComingled() {
     const exceedNorm = Math.max(0, (energy - range.threshold)) / headroom;
     const exceedPower = Math.pow(exceedNorm, 1.8);
 
-    let count = Math.floor(exceedPower * 58 * range.weight);
-    count = Math.min(count, 75);
+    let count = Math.floor(exceedPower * 36 * range.weight);
+    count = Math.min(count, 48);
     if (count < 1) continue;
 
     for (let j = 0; j < count; j++) {
@@ -352,8 +359,10 @@ function createColoredParticle(range, energy) {
   p.lifespan = 255 * range.alpha * lifeMultiplier;
   p.fadeRate = fadeRate;
 
-  // Stroke weight: radial bias (center thicker) × random size category so
-  // each "zone" has a mix of slim streaks and chunky standouts.
+  // Stroke weight: radial bias (center thicker) × random size category ×
+  // an energy boost so loud notes spawn visibly chunkier particles in their
+  // own color — gives each note a clearer per-loudness visual signature
+  // even when total particle counts are modest.
   const radialWeight = 1 + (1 - rNorm) * 3.0;  // 4.0 at center → 1.0 at edge
   const sizeRoll = Math.random();
   let sizeFactor;
@@ -364,7 +373,10 @@ function createColoredParticle(range, energy) {
   } else {
     sizeFactor = random(2.0, 3.5);   // rare chunky standouts
   }
-  p.strokeWeight = radialWeight * sizeFactor;
+  // relativeEnergy is ~0 at threshold, ~1 at 4× threshold. Cap the boost so
+  // sustained loud bands don't pin everything at max thickness.
+  const energyBoost = 1 + Math.min(range.relativeEnergy || 0, 1.5) * 0.55;
+  p.strokeWeight = radialWeight * sizeFactor * energyBoost;
 
   // Speed scaling by group
   if (range.group === "bass") {
