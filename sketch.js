@@ -73,6 +73,12 @@ let peakEnergy = 0;
 // alone reads as "to the beat" and never mis-locks.
 let pulseEnvelope = 0;
 
+// Volume envelope: slow EMA on audioLevel. Drives a global stroke-weight
+// scale so quiet passages render visibly smaller and loud passages render
+// larger, smoothed enough that it tracks loudness, not transients (the
+// pulse envelope handles the transient layer). ~225ms half-life at 60fps.
+let volumeEnvelope = 0;
+
 // Touch / click disruptions: each entry is a localized swirl impulse
 // {x, y, life, strength} that adds a tangential boost to flowfield cells
 // within `TOUCH_RADIUS`, fading out as `life` decays from TOUCH_LIFE → 0.
@@ -103,11 +109,15 @@ for (const r of frequencyRanges) {
 // particle wasn't assigned one (so any v3-origin particles would still work).
 Particle.prototype.show = function () {
   stroke(red(this.color), green(this.color), blue(this.color), this.lifespan);
-  // Apply the global beat pulse to every live particle's stroke (not just
-  // newly-spawned ones) so the whole field thickens together on the beat.
-  // 0.30 multiplier puts the swing at ~30% on peaks — clearly felt as a
-  // bounce. Above ~0.40 starts crossing into strobe territory.
-  strokeWeight((this.strokeWeight || 1) * (1 + pulseEnvelope * 0.30));
+  // Two stacked global modulations on every live particle's stroke:
+  //   beatMul   — fast 1.0–1.30× swing on each kick (pulseEnvelope, ~130ms)
+  //   volumeMul — slow 0.65–1.95× scale tracking overall loudness (~225ms)
+  // Real-world audioLevel rarely sustains above ~0.6, so a linear curve
+  // wastes half the range; sqrt() lifts moderate loudness into the visible
+  // band (ve=0.5 → curved 0.71 → mul 1.57).
+  const beatMul = 1 + pulseEnvelope * 0.30;
+  const volumeMul = 0.65 + Math.sqrt(volumeEnvelope) * 1.30;
+  strokeWeight((this.strokeWeight || 1) * beatMul * volumeMul);
   line(this.pos.x, this.pos.y, this.prevPos.x, this.prevPos.y);
   this.updatePrev();
 };
@@ -177,6 +187,14 @@ function draw() {
     if (particles[i].isDead()) {
       particles.splice(i, 1);
     }
+  }
+
+  // Hard global cap: long-ribbon bucket (12% with up to ~1600-frame lifespan)
+  // can otherwise pile up in busy passages. Cull oldest first (front of the
+  // array, since spawns push onto the end) so newer transients survive.
+  const MAX_PARTICLES = 1200;
+  if (particles.length > MAX_PARTICLES) {
+    particles.splice(0, particles.length - MAX_PARTICLES);
   }
 
   if (uiVisible) {
@@ -346,6 +364,12 @@ function analyzeAudio() {
   // then decays exponentially. At 60fps a 0.92 decay halves the envelope
   // in ~8 frames (~130ms) — feels like a heartbeat, not a flicker.
   pulseEnvelope = Math.max(pulseEnvelope * 0.92, bassLevel);
+
+  // Slow EMA on audioLevel for the volume-driven size scale. Symmetric
+  // smoothing (no peak-hold) so it falls back down at the same rate it
+  // rises — silence visibly shrinks particles instead of holding them
+  // chunky from a recent loud passage.
+  volumeEnvelope = volumeEnvelope * 0.95 + Math.max(0, audioLevel) * 0.05;
 }
 
 // v6: Multiple ranges can spawn simultaneously (comingling), but spawn counts
@@ -376,9 +400,12 @@ function spawnParticlesComingled() {
     // Spawn-rate is also pulse-modulated: on the beat, ranges that pass the
     // peak gate fire up to ~50% more particles. Combined with the stroke
     // pulse, this puts a visible density burst right on the kick.
+    // Base count progressively dropped (24→18→14→10) + cap 40→32→24 to
+    // keep total live particles in check; the global cull in draw() catches
+    // any remaining long-ribbon accumulation.
     const beatSpawnBoost = 1 + pulseEnvelope * 0.5;
-    let count = Math.floor(exceedPower * 18 * range.weight * beatSpawnBoost);
-    count = Math.min(count, 40);
+    let count = Math.floor(exceedPower * 10 * range.weight * beatSpawnBoost);
+    count = Math.min(count, 24);
     if (count < 1) continue;
 
     for (let j = 0; j < count; j++) {
